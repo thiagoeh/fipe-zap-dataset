@@ -1,0 +1,52 @@
+[settings]
+experimental = true
+
+[tools]
+uv = "latest"
+
+[deps.uv]
+auto = true
+
+[tasks.setup]
+description = "Install tools and project dependencies (uv owns .venv)"
+run = "mise deps install"
+
+[tasks.lint]
+description = "Ruff lint"
+run = "uv run ruff check ."
+
+[tasks.fmt]
+description = "Ruff format"
+run = "uv run ruff format ."
+
+[tasks.test]
+description = "Pytest; forward args e.g. mise run test -k nulls"
+run = "uv run pytest"
+
+[tasks.check]
+description = "Lint + tests"
+depends = ["lint", "test"]
+
+[tasks.download]
+description = "Download the FIPE ZAP XLSX to data/"
+run = "mkdir -p data && uv run fipezap-sqlite download --output data/fipezap-serieshistoricas.xlsx"
+
+[tasks.build]
+description = "Download XLSX and rebuild data/fipezap.sqlite3"
+run = "mkdir -p data && uv run fipezap-sqlite build --download --output data/fipezap.sqlite3"
+
+[tasks.smoke]
+description = "Rebuild from live URL and answer the critical m2 price question"
+run = """
+uv run fipezap-sqlite build --download --output /tmp/fipezap-smoke.sqlite3
+uv run python -c '
+import sqlite3
+con = sqlite3.connect("/tmp/fipezap-smoke.sqlite3")
+print("rows:", con.execute("SELECT count(*) FROM fipezap").fetchone()[0])
+print("m2 SP latest:")
+for row in con.execute(
+    "SELECT data, tipo, valor FROM preco_m2_atual WHERE cidade = ?", ("São Paulo",)
+):
+    print(" ", row)
+'
+"""
