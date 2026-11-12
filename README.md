@@ -23,11 +23,15 @@ fipezap-sqlite build --download
 "qual o preço médio do m² na cidade X?"
 
 ```sql
-SELECT data, tipo, valor FROM preco_m2_atual WHERE cidade = 'São Paulo';
+SELECT segmento, tipo, data, valor FROM preco_m2_atual WHERE cidade = 'São Paulo';
 ```
 
-Table: `fipezap (cidade, data, tipo, categoria, metrica, valor)`. Views: `atual`
-(latest snapshot per city), `preco_m2_atual` (latest non-null m² price per tipo).
+Filter `segmento = 'residencial' | 'comercial'` (or omit for both).
+
+Table: `fipezap (cidade, segmento, data, tipo, categoria, metrica, valor)`. Views: `atual`
+(latest snapshot per cidade+segmento), `preco_m2_atual` (latest non-null m² price per tipo).
+Cities include `Brasil` (the national aggregate); `metrica` covers `rentabilidade_aluguel`
+(rental yield).
 
 ## Development
 

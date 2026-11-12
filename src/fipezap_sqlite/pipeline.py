@@ -10,18 +10,21 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 SOURCE_URL = "https://downloads.fipe.org.br/indices/fipezap/fipezap-serieshistoricas.xlsx"
-SKIP_SHEETS = frozenset({"Resumo", "Aux", "Índice FipeZAP"})
+SKIP_SHEETS = frozenset({"Resumo", "Aux"})
+AGGREGATE_CITIES = {"Índice FipeZAP": "Brasil"}
 KINDS = (
     ("venda", "venda"),
     ("locação", "locacao"),
     ("preços de venda", "venda"),
     ("preços de locação", "locacao"),
+    ("rentabilidade do aluguel", "locacao"),
 )
 METRICS = {
     "número-índice": "indice",
     "var. mensal": "variacao_mensal",
     "var. em 12 meses": "variacao_12m",
     "preço médio": "preco_m2",
+    "(% - mensalizada": "rentabilidade_aluguel",
 }
 MISSING = frozenset({"", ".", "não disponível"})
 DATA_COL = 1
@@ -31,6 +34,7 @@ ALL_TIPOS = frozenset({"venda", "locacao"})
 SCHEMA = """
 CREATE TABLE fipezap (
     cidade TEXT NOT NULL,
+    segmento TEXT NOT NULL CHECK (segmento IN ('residencial', 'comercial')),
     data TEXT NOT NULL CHECK (
         data GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
         AND data = strftime('%Y-%m-%d', data)
@@ -40,26 +44,29 @@ CREATE TABLE fipezap (
     tipo TEXT NOT NULL CHECK (tipo IN ('venda', 'locacao')),
     categoria TEXT NOT NULL CHECK (categoria IN ('total', '1d', '2d', '3d', '4d')),
     metrica TEXT NOT NULL CHECK (
-        metrica IN ('indice', 'variacao_mensal', 'variacao_12m', 'preco_m2')
+        metrica IN (
+            'indice', 'variacao_mensal', 'variacao_12m', 'preco_m2', 'rentabilidade_aluguel'
+        )
     ),
     valor REAL,
-    PRIMARY KEY (cidade, metrica, categoria, data, tipo)
+    PRIMARY KEY (cidade, segmento, metrica, categoria, data, tipo)
 ) STRICT, WITHOUT ROWID;
 
 CREATE VIEW preco_m2 AS
-    SELECT cidade, data, tipo, categoria, valor
+    SELECT cidade, segmento, data, tipo, categoria, valor
     FROM fipezap
     WHERE metrica = 'preco_m2';
 
 CREATE VIEW atual AS
-    SELECT f.cidade, f.data, f.tipo, f.categoria, f.metrica, f.valor
+    SELECT f.cidade, f.segmento, f.data, f.tipo, f.categoria, f.metrica, f.valor
     FROM fipezap f
     WHERE f.data = (
-        SELECT max(g.data) FROM fipezap g WHERE g.cidade = f.cidade
+        SELECT max(g.data) FROM fipezap g
+        WHERE g.cidade = f.cidade AND g.segmento = f.segmento
     );
 
 CREATE VIEW preco_m2_atual AS
-    SELECT f.cidade, f.data, f.tipo, f.valor
+    SELECT f.cidade, f.segmento, f.data, f.tipo, f.valor
     FROM fipezap f
     WHERE f.metrica = 'preco_m2'
       AND f.categoria = 'total'
@@ -70,6 +77,7 @@ CREATE VIEW preco_m2_atual AS
             AND g.categoria = 'total'
             AND g.valor IS NOT NULL
             AND g.cidade = f.cidade
+            AND g.segmento = f.segmento
             AND g.tipo = f.tipo
       );
 
@@ -111,7 +119,9 @@ def _segments(row: tuple[object, ...], col: int, current: str | None) -> str | N
     return current if not label else None
 
 
-def _columns(ws: Worksheet, tipos: frozenset[str]) -> list[tuple[int, str, str, str]]:
+def _columns(
+    ws: Worksheet, tipos: frozenset[str]
+) -> list[tuple[int, str, str, str, str]]:
     header = list(ws.iter_rows(min_row=1, max_row=4, values_only=True))
     segment_row, kind_row, metric_row, category_row = header
     if _normalize(category_row[DATA_COL]) != "data":
@@ -121,7 +131,7 @@ def _columns(ws: Worksheet, tipos: frozenset[str]) -> list[tuple[int, str, str, 
     kind: str | None = None
     metrica: str | None = None
     skipped: set[str] = set()
-    mapping: list[tuple[int, str, str, str]] = []
+    mapping: list[tuple[int, str, str, str, str]] = []
     for col, category in enumerate(category_row):
         segment = _segments(segment_row, col, segment)
         block = _normalize(kind_row[col] if col < len(kind_row) else None)
@@ -134,11 +144,9 @@ def _columns(ws: Worksheet, tipos: frozenset[str]) -> list[tuple[int, str, str, 
             metrica = _metrica(label)
         if col == DATA_COL or kind is None or metrica is None or kind not in tipos:
             continue
-        if segment != "residencial":
-            continue
         categoria = _normalize(category)
-        if categoria:
-            mapping.append((col, kind, categoria, metrica))
+        if categoria and segment is not None:
+            mapping.append((col, segment, kind, categoria, metrica))
     if not mapping:
         msg = f"sheet {ws.title!r}: no data columns"
         raise ValueError(msg)
@@ -173,31 +181,31 @@ def _data(value: object) -> str | None:
 def _records(
     city: str,
     ws: Worksheet,
-    columns: list[tuple[int, str, str, str]],
-) -> list[tuple[str, str, str, str, str, float | None]]:
+    columns: list[tuple[int, str, str, str, str]],
+) -> list[tuple[str, str, str, str, str, str, float | None]]:
     records = []
     for row in ws.iter_rows(min_row=BODY_ROW, values_only=True):
         day = _data(row[DATA_COL] if len(row) > DATA_COL else None)
         if day is None:
             break
-        for col, tipo, categoria, metrica in columns:
+        for col, segmento, tipo, categoria, metrica in columns:
             value = _valor(row[col] if len(row) > col else None)
-            records.append((city, day, tipo, categoria, metrica, value))
+            records.append((city, segmento, day, tipo, categoria, metrica, value))
     return records
 
 
 def extract(
     xlsx: Path,
     tipos: frozenset[str] = ALL_TIPOS,
-) -> list[tuple[str, str, str, str, str, float | None]]:
+) -> list[tuple[str, str, str, str, str, str, float | None]]:
     wb = load_workbook(xlsx, read_only=True, data_only=True)
     try:
-        records: list[tuple[str, str, str, str, str, float | None]] = []
+        records: list[tuple[str, str, str, str, str, str, float | None]] = []
         for name in wb.sheetnames:
             if name in SKIP_SHEETS:
                 continue
             ws = wb[name]
-            rows = _records(name, ws, _columns(ws, tipos))
+            rows = _records(AGGREGATE_CITIES.get(name, name), ws, _columns(ws, tipos))
             logger.info("{}: {} rows", name, len(rows))
             records.extend(rows)
     finally:
@@ -234,7 +242,7 @@ def build(xlsx: Path, output: Path, tipos: frozenset[str] = ALL_TIPOS) -> None:
     try:
         with conn:
             conn.executescript(SCHEMA)
-            conn.executemany("INSERT INTO fipezap VALUES (?, ?, ?, ?, ?, ?)", records)
+            conn.executemany("INSERT INTO fipezap VALUES (?, ?, ?, ?, ?, ?, ?)", records)
             conn.execute(
                 "INSERT INTO metadados VALUES (?, ?, ?)",
                 (SOURCE_URL, _sha256(xlsx), datetime.now(UTC).isoformat(timespec="seconds")),

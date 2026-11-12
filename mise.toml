@@ -45,8 +45,12 @@ con = sqlite3.connect("/tmp/fipezap-smoke.sqlite3")
 print("rows:", con.execute("SELECT count(*) FROM fipezap").fetchone()[0])
 print("m2 SP latest:")
 for row in con.execute(
-    "SELECT data, tipo, valor FROM preco_m2_atual WHERE cidade = ?", ("São Paulo",)
+    "SELECT segmento, tipo, data, valor FROM preco_m2_atual WHERE cidade = ?", ("São Paulo",)
 ):
     print(" ", row)
 '
 """
+
+[tasks.query]
+description = "Query data/fipezap.sqlite3: mise run query -- 'SELECT ...'"
+run = "uvx sqlite-utils query -t data/fipezap.sqlite3"
